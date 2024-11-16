@@ -1,0 +1,133 @@
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <TFT_eSPI.h> // Include the display library
+
+// Blynk Auth Token and Wi-Fi credentials
+char auth[] = "DLwXMt7xZ8dNF3u66rfPt7c-Gp9wOj5e";
+char ssid[] = "project";
+char pass[] = "12345678";
+
+// Ultrasonic Sensor pins
+#define TRIG_PIN 12  // GPIO12 for Trigger
+#define ECHO_PIN 13  // GPIO13 for Echo
+
+// Flow Sensor pin
+#define FLOW_SENSOR_PIN 17 // Digital input pin for flow sensor
+
+// TFT display object
+TFT_eSPI tft = TFT_eSPI();
+
+// Variables for measurements
+long duration;
+float distance;
+const float bottleHeight = 20.0; // Total bottle height in cm
+const float bottleVolume = 1000.0; // Example total volume in mL (adjust based on your bottle's capacity)
+volatile int flowPulseCount = 0;
+float flowRate; // Flow rate in mL/min
+unsigned long previousMillis = 0;
+
+// Alert flags
+bool startAlertSent = false;
+bool fiftyPercentAlertSent = false;
+bool hundredPercentAlertSent = false;
+
+// Interrupt service routine for flow sensor pulses
+void IRAM_ATTR pulseCounter() {
+  flowPulseCount++;
+}
+
+void setup() {
+  // Serial and display initialization
+  Serial.begin(115200);
+  tft.init();
+  tft.setRotation(1);
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  
+  // Wi-Fi connection
+  tft.drawString("Connecting to Wi-Fi...", 10, 10, 2);
+  WiFi.begin(ssid, pass);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected to Wi-Fi");
+  tft.fillScreen(TFT_BLACK);
+  tft.drawString("Connected to Wi-Fi", 10, 10, 2);
+  
+  // Connect to Blynk
+  Blynk.begin(auth, ssid, pass, "blynk.cloud", 80);
+  tft.drawString("Connected to Blynk", 10, 30, 2);
+  
+  // Ultrasonic sensor setup
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  
+  // Flow sensor setup
+  pinMode(FLOW_SENSOR_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), pulseCounter, RISING);
+}
+
+void loop() {
+  Blynk.run();
+
+  // Measure distance using ultrasonic sensor
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  duration = pulseIn(ECHO_PIN, HIGH);
+  distance = (duration * 0.034) / 2;
+
+  // Calculate saline level percentage
+  float salineLevel = ((bottleHeight - distance) / bottleHeight) * 100;
+  salineLevel = constrain(salineLevel, 0, 100);
+
+  // Calculate remaining volume
+  float remainingVolume = (salineLevel / 100) * bottleVolume;
+
+  // Flow rate calculation (assuming pulse frequency corresponds to flow rate in mL/min)
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis > 1000) {
+    previousMillis = currentMillis;
+    flowRate = (flowPulseCount / 7.5); // Example conversion factor; adjust as per your flow sensor specs
+    flowPulseCount = 0;
+  }
+
+  // Calculate estimated time to empty (in minutes)
+  float estimatedTimeRemaining = 0;
+  if (flowRate > 0) {
+    estimatedTimeRemaining = remainingVolume / flowRate; // Time in minutes
+  }
+
+  // Send data to Blynk
+  Blynk.virtualWrite(V0, salineLevel);
+  Blynk.virtualWrite(V1, flowRate);
+  Blynk.virtualWrite(V2, estimatedTimeRemaining);
+
+  // Display data on TFT
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.drawString("Saline Level: " + String(salineLevel) + "%", 10, 10, 2);
+  tft.drawString("Flow Rate: " + String(flowRate) + " mL/min", 10, 40, 2);
+  tft.drawString("Time Left: " + String(estimatedTimeRemaining) + " min", 10, 70, 2);
+
+  // Alerts logic
+  if (!startAlertSent && salineLevel < 100) {
+    Blynk.logEvent("saline_start", "Saline monitoring started");
+    startAlertSent = true;
+  }
+
+  if (!fiftyPercentAlertSent && salineLevel <= 50) {
+    Blynk.logEvent("saline_half", "Saline level is at 50%");
+    fiftyPercentAlertSent = true;
+  }
+
+  if (!hundredPercentAlertSent && salineLevel <= 0) {
+    Blynk.logEvent("saline_empty", "Saline level is at 0%");
+    hundredPercentAlertSent = true;
+  }
+
+  delay(1000); // Delay to avoid rapid updates
+}
